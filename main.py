@@ -38,6 +38,8 @@ class LogEventCorrelator:
         self.log_file = config.get("log_file")
         self.patterns = config.get("patterns")
         self.aggregation_interval = config.get("aggregation_interval", 60)
+        # This set is never pruned. cleanup_old_counts trims the counts and leaves this alone,
+        # so it grows by an entry per pattern per window for as long as the process runs.
         self.alerts_fired = set()
         self.event_counts: Dict[str, Dict[str, int]] = defaultdict(
             lambda: defaultdict(int)
@@ -84,6 +86,9 @@ class LogEventCorrelator:
         try:
             with open(self.log_file, "r") as f:
                 # Seek to the last processed line
+                # Skipping by counting lines from the top makes every pass reread the file up to my
+                # bookmark. A rotated log with fewer lines leaves the bookmark past the end, and
+                # new lines sit unread until the file grows past it again.
                 for _ in range(self.last_processed_line):
                     next(f, None)
 
@@ -95,6 +100,9 @@ class LogEventCorrelator:
                     if not line:
                         continue  # Skip empty lines
 
+                    # The window stamp is the moment I read the line, not any time written inside the
+                    # line. Replaying an old log puts every event into today's windows, so a slow
+                    # build up over days can look like a burst happening now.
                     timestamp = datetime.now()  # Current timestamp
                     for pattern in self.patterns:
                         if re.search(pattern["regex"], line):
@@ -104,6 +112,8 @@ class LogEventCorrelator:
                             window_key = self._calculate_window_key(
                                 timestamp, pattern["aggregation_window"]
                             )
+                            # Counts are keyed by pattern name alone, so two patterns sharing a name share one
+                            # counter and one window. Either of them can trip the other's threshold.
                             self.event_counts[pattern["name"]][window_key] += 1
                             self._check_threshold_and_alert(pattern, window_key)
 
@@ -191,6 +201,8 @@ class LogEventCorrelator:
                     window_key,
                 ]
                 logging.info(f"Executing alert script: {command}")
+                # I wait on the alert script with no timeout. A script that hangs holds this whole
+                # pass, and the scheduling loop with it, since both live on the same thread.
                 subprocess.run(command, check=False)
             else:
                 logging.error(
