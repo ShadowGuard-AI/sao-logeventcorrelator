@@ -8,10 +8,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 
 import schedule
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
+import subprocess
+import sys
 
 # Configure logging
 logging.basicConfig(
@@ -60,6 +58,14 @@ class LogEventCorrelator:
                 raise ValueError(
                     "Each pattern must include 'name', 'regex', 'aggregation_window', 'threshold', and 'alert_destination'."
                 )
+            if not isinstance(pattern["aggregation_window"], int) or pattern["aggregation_window"] < 1:
+                raise ValueError(
+                    f"aggregation_window for pattern '{pattern['name']}' must be at least 1."
+                )
+            if not str(pattern["alert_destination"]).startswith("script:"):
+                raise ValueError(
+                    f"alert_destination for pattern '{pattern['name']}' must start with 'script:'. Other destinations are not supported."
+                )
             try:
                 re.compile(pattern["regex"])  # Test if regex is valid
             except re.error as e:
@@ -70,7 +76,11 @@ class LogEventCorrelator:
     def process_logs(self):
         """
         Processes the log file, matches patterns, and triggers alerts.
+
+        Returns:
+            int: The number of lines read in this run.
         """
+        lines_read = 0
         try:
             with open(self.log_file, "r") as f:
                 # Seek to the last processed line
@@ -78,6 +88,7 @@ class LogEventCorrelator:
                     next(f, None)
 
                 for line in f:
+                    lines_read += 1
                     line = line.strip()
                     self.last_processed_line += 1  # Increment the counter.
 
@@ -98,8 +109,12 @@ class LogEventCorrelator:
 
         except FileNotFoundError:
             logging.error(f"Log file not found: {self.log_file}")
+            raise
         except Exception as e:
             logging.error(f"Error processing logs: {e}")
+            raise
+        logging.info(f"Processed {lines_read} lines from {self.log_file}")
+        return lines_read
 
     def _calculate_window_key(self, timestamp: datetime, aggregation_window: int) -> str:
         """
@@ -112,10 +127,11 @@ class LogEventCorrelator:
         Returns:
             str: The window key.
         """
-        window_start = timestamp - timedelta(
-            seconds=timestamp.second % aggregation_window,
-            microseconds=timestamp.microsecond,
-        )
+        if aggregation_window < 1:
+            raise ValueError("aggregation_window must be at least 1.")
+        epoch = int(timestamp.timestamp())
+        floored = (epoch // aggregation_window) * aggregation_window
+        window_start = datetime.fromtimestamp(floored, tz=timestamp.tzinfo)
         return window_start.isoformat()
 
     def _check_threshold_and_alert(self, pattern: Dict, window_key: str):
@@ -164,7 +180,7 @@ class LogEventCorrelator:
 
                 # Security note: Be VERY careful about running external scripts.
                 # Ensure scripts are properly vetted and sandboxed if possible.
-                # Consider using a more robust and secure method for triggering actions.
+                # Consider using a safer method for triggering actions.
                 command = [
                     script_path,
                     "--pattern",
@@ -175,11 +191,10 @@ class LogEventCorrelator:
                     window_key,
                 ]
                 logging.info(f"Executing alert script: {command}")
-                os.system(" ".join(command))  # Insecure; use subprocess.run with proper escaping.
+                subprocess.run(command, check=False)
             else:
-                # Placeholder for other alert mechanisms (e.g., email, API calls)
-                logging.info(
-                    f"Simulating alert to {alert_destination} for pattern '{pattern_name}': Count = {count}, Window = {window_key}"
+                logging.error(
+                    f"Unsupported alert destination: {alert_destination}. Only script: destinations are supported."
                 )
         except Exception as e:
             logging.error(f"Error triggering alert: {e}")
@@ -286,15 +301,16 @@ def main():
         correlator = LogEventCorrelator(config)
 
         def job():
-            correlator.process_logs()
+            lines = correlator.process_logs()
             correlator.cleanup_old_counts()
+            return lines
 
         aggregation_interval = config.get("aggregation_interval", 60)
 
         schedule.every(aggregation_interval).seconds.do(job)
 
         if args.oneshot:
-            job()  # Run once
+            job()  # Run once; any load or read failure raises and exits 1 below.
             logging.info("Log correlation completed in oneshot mode.")
         else:
             logging.info(
@@ -306,6 +322,7 @@ def main():
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
@@ -328,7 +345,7 @@ if __name__ == "__main__":
 #       "regex": "Failed login attempt",
 #       "aggregation_window": 300,
 #       "threshold": 5,
-#       "alert_destination": "admin@example.com"
+#       "alert_destination": "script:./alert_script.sh"
 #     }
 #   ],
 #   "aggregation_interval": 30
@@ -336,4 +353,12 @@ if __name__ == "__main__":
 
 # Example alert_script.sh:
 # #!/bin/bash
-# echo "Alert triggered: Pattern=$1 Count=$2 Window=$3" >> alert.log
+# while [ $# -gt 0 ]; do
+#   case "$1" in
+#     --pattern) pattern="$2"; shift 2 ;;
+#     --count) count="$2"; shift 2 ;;
+#     --window) window="$2"; shift 2 ;;
+#     *) shift ;;
+#   esac
+# done
+# echo "Alert triggered: Pattern=$pattern Count=$count Window=$window" >> alert.log
