@@ -8,16 +8,16 @@ The only working alert destination is a value starting with `script:`. Any other
 A configuration that fails to load ends the run at exit 1 in both modes. In `--oneshot` mode, a log file that cannot be opened also exits 1, and a run that read zero lines because of an error does not print the completed line.
 
 ## Install
-`git clone https://github.com/ShadowGuardAI/sao-logeventcorrelator`
+`git clone https://github.com/ShadowGuard-AI/sao-logeventcorrelator`
 `pip install -r requirements.txt`
 
 ## Usage
-`./sao-logeventcorrelator [params]`
+`python3 main.py [--config config.json] [--oneshot]`
 
 ## Parameters
-- `-h`: Show help message and exit
-- `--config`: No description provided
+- `-h, --help`: Show help message and exit
+- `--config, -c`: Path to the configuration file (JSON) (default: config.json).
 - `--oneshot`: Run the correlation once and exit. Useful for testing.
 
 ## License
-Copyright (c) ShadowGuardAI
+MIT License. See LICENSE.
